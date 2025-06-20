@@ -46,18 +46,18 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     # Data transforms for 128x128 images
     data_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5] * n_channels, std=[0.5] * n_channels)  # Adjust mean/std if known
+        transforms.Normalize(mean=[0.5] * n_channels, std=[0.5] * n_channels)
     ])
 
-    # Load pathmnist dataset at 128x128
+    # Load pathmnist dataset at 128x128 with parallel loading
     train_dataset = DataClass(split='train', transform=data_transform, download=download, as_rgb=as_rgb, size=size)
     val_dataset = DataClass(split='val', transform=data_transform, download=download, as_rgb=as_rgb, size=size)
     test_dataset = DataClass(split='test', transform=data_transform, download=download, as_rgb=as_rgb, size=size)
 
-    train_loader = data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
-    train_loader_at_eval = data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=False)
-    val_loader = data.DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
+    train_loader_at_eval = data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
+    val_loader = data.DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
+    test_loader = data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
 
     print('==> Building and training model...')
 
@@ -81,7 +81,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     # Initialize W&B
     wandb.init(
-        project="pathmnist-experiment",  # Replace with your project name
+        project="pathmnist-experiment",
         config={
             "learning_rate": lr,
             "gamma": gamma,
@@ -96,7 +96,6 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
             "run_name": run
         }
     )
-    # Name the run for clarity
     wandb.run.name = f"{data_flag}_{model_flag}_{run}"
 
     if model_path:
@@ -107,7 +106,6 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         print(f'train auc: {train_metrics[1]:.5f} acc: {train_metrics[2]:.5f}')
         print(f'val auc: {val_metrics[1]:.5f} acc: {val_metrics[2]:.5f}')
         print(f'test auc: {test_metrics[1]:.5f} acc: {test_metrics[2]:.5f}')
-        # Log metrics for pretrained model
         wandb.log({
             "pretrained_train_loss": train_metrics[0],
             "pretrained_train_auc": train_metrics[1],
@@ -136,18 +134,16 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     best_auc = 0
     best_epoch = 0
     best_model = deepcopy(model)
-    global iteration
-    iteration = 0
+    iteration = 0  # Removed global for cleaner scope
 
     for epoch in trange(num_epochs):
-        train_loss = train(model, train_loader, task, criterion, optimizer, device)
+        train_loss = train(model, train_loader, task, criterion, optimizer, device, epoch)
         train_metrics = test(model, train_evaluator, train_loader_at_eval, task, criterion, device, run)
         val_metrics = test(model, val_evaluator, val_loader, task, criterion, device, run)
         test_metrics = test(model, test_evaluator, test_loader, task, criterion, device, run)
 
         scheduler.step()
 
-        # Log metrics to W&B
         for i, key in enumerate(train_logs):
             log_dict[key] = train_metrics[i]
         for i, key in enumerate(val_logs):
@@ -155,7 +151,6 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         for i, key in enumerate(test_logs):
             log_dict[key] = test_metrics[i]
 
-        # Log all metrics for this epoch
         wandb.log(log_dict, step=epoch)
 
         cur_auc = val_metrics[1]
@@ -165,19 +160,16 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
             best_model = deepcopy(model)
             print(f'cur_best_auc: {best_auc}')
             print(f'cur_best_epoch: {best_epoch}')
-            # Save best model as W&B artifact
             model_path = os.path.join(output_root, 'best_model.pth')
             torch.save({'net': best_model.state_dict()}, model_path)
             artifact = wandb.Artifact(f'best_model_{run}_epoch_{best_epoch}', type='model')
             artifact.add_file(model_path)
             wandb.log_artifact(artifact)
 
-    # Final evaluation with best model
     train_metrics = test(best_model, train_evaluator, train_loader_at_eval, task, criterion, device, run, output_root)
     val_metrics = test(best_model, val_evaluator, val_loader, task, criterion, device, run, output_root)
     test_metrics = test(best_model, test_evaluator, test_loader, task, criterion, device, run, output_root)
 
-    # Log final metrics
     wandb.log({
         "final_train_loss": train_metrics[0],
         "final_train_auc": train_metrics[1],
@@ -201,12 +193,10 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     with open(os.path.join(output_root, f'{data_flag}_log.txt'), 'a') as f:
         f.write(log)
 
-    # Finish W&B run
     wandb.finish()
 
-def train(model, train_loader, task, criterion, optimizer, device):
+def train(model, train_loader, task, criterion, optimizer, device, epoch):
     total_loss = []
-    global iteration
     model.train()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
         optimizer.zero_grad()
@@ -218,12 +208,10 @@ def train(model, train_loader, task, criterion, optimizer, device):
             targets = torch.squeeze(targets, 1).long().to(device)
             loss = criterion(outputs, targets)
         total_loss.append(loss.item())
-        # Log per-batch loss to W&B
-        wandb.log({'train_loss_logs': loss.item()}, step=iteration)
-        iteration += 1
         loss.backward()
         optimizer.step()
     epoch_loss = sum(total_loss) / len(total_loss)
+    wandb.log({'train_loss_logs': epoch_loss}, step=epoch)
     return epoch_loss
 
 def test(model, evaluator, data_loader, task, criterion, device, run, save_folder=None):
@@ -245,7 +233,7 @@ def test(model, evaluator, data_loader, task, criterion, device, run, save_folde
                 m = nn.Softmax(dim=1)
                 outputs = m(outputs)
             total_loss.append(loss.item())
-            y_score.append(outputs.cpu())  # Move to CPU to avoid device mismatch
+            y_score.append(outputs.cpu())
 
         y_score = torch.cat(y_score, dim=0).numpy()
         auc, acc = evaluator.evaluate(y_score, save_folder, run)
