@@ -10,52 +10,26 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 import torchvision.transforms as transforms
-from medmnist import Evaluator
+from medmnist import INFO, Evaluator, BloodMNIST
 from models import ResNet18, ResNet50
-import wandb  
+import wandb
 from tqdm import trange
-from torch.utils.data import Dataset
-
-# Custom Dataset class for .npz file
-class NPZDataset(Dataset):
-    def __init__(self, npz_path, transform=None, split='train'):
-        data = np.load(npz_path)
-        if split == 'train':
-            self.images = data['train_images']
-            self.labels = data['train_labels']
-        elif split == 'val':
-            self.images = data['val_images']
-            self.labels = data['val_labels']
-        elif split == 'test':
-            self.images = data['test_images']
-            self.labels = data['test_labels']
-        else:
-            raise ValueError("Split must be 'train', 'val', or 'test'")
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        image = self.images[idx]
-        label = self.labels[idx]
-        if self.transform:
-            image = self.transform(image)
-        return image, label
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, as_rgb, model_path, run):
     lr = 0.001
     gamma = 0.1
     milestones = [0.5 * num_epochs, 0.75 * num_epochs]
-    size = 128  # Adjusted for bloodmnist_128.npz
+    size = 128  # For bloodmnist_128
     patience = 10  # Number of epochs to wait for improvement before stopping
 
-    if data_flag != 'bloodmnist_128':
-        raise ValueError("This script is configured for bloodmnist_128.npz only")
+    if data_flag != 'bloodmnist':
+        raise ValueError("This script is configured for bloodmnist only")
 
-    # Assuming bloodmnist_128.npz has 3 channels and 8 classes (standard for BloodMNIST)
-    n_channels = 3  # RGB
-    n_classes = 8   # 8 classes for BloodMNIST
+    # Get dataset info from MedMNIST
+    info = INFO[data_flag]
+    n_channels = info['n_channels']  # 3 for BloodMNIST (RGB)
+    n_classes = len(info['label'])   # 8 classes for BloodMNIST
+    task = info['task']              # multi-class
 
     # GPU setup
     str_ids = gpu_ids.split(',')
@@ -75,11 +49,10 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         transforms.Normalize(mean=[0.5] * n_channels, std=[0.5] * n_channels)
     ])
 
-    # Load custom bloodmnist_128.npz dataset with parallel loading
-    npz_path = 'bloodmnist_128.npz'  # Path to your .npz file
-    train_dataset = NPZDataset(npz_path, transform=data_transform, split='train')
-    val_dataset = NPZDataset(npz_path, transform=data_transform, split='val')
-    test_dataset = NPZDataset(npz_path, transform=data_transform, split='test')
+    # Load BloodMNIST dataset from MedMNIST
+    train_dataset = BloodMNIST(split='train', transform=data_transform, download=download, size=128, as_rgb=as_rgb)
+    val_dataset = BloodMNIST(split='val', transform=data_transform, download=download, size=128, as_rgb=as_rgb)
+    test_dataset = BloodMNIST(split='test', transform=data_transform, download=download, size=128, as_rgb=as_rgb)
 
     train_loader = data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
     train_loader_at_eval = data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
@@ -98,12 +71,12 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     model = model.to(device)
 
-    # Evaluators (using bloodmnist as a proxy since Evaluator expects a data_flag)
-    train_evaluator = Evaluator('bloodmnist', 'train', size=size)
-    val_evaluator = Evaluator('bloodmnist', 'val', size=size)
-    test_evaluator = Evaluator('bloodmnist', 'test', size=size)
+    # Evaluators
+    train_evaluator = Evaluator(data_flag, 'train', size=size)
+    val_evaluator = Evaluator(data_flag, 'val', size=size)
+    test_evaluator = Evaluator(data_flag, 'test', size=size)
 
-    # Loss function (bloodmnist is multi-class)
+    # Loss function
     criterion = nn.CrossEntropyLoss()
 
     # Initialize W&B
@@ -128,9 +101,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     if model_path:
         model.load_state_dict(torch.load(model_path, map_location=device)['net'], strict=True)
-        train_metrics = test(model, train_evaluator, train_loader_at_eval, 'multi-class', criterion, device, run, output_root)
-        val_metrics = test(model, val_evaluator, val_loader, 'multi-class', criterion, device, run, output_root)
-        test_metrics = test(model, test_evaluator, test_loader, 'multi-class', criterion, device, run, output_root)
+        train_metrics = test(model, train_evaluator, train_loader_at_eval, task, criterion, device, run, output_root)
+        val_metrics = test(model, val_evaluator, val_loader, task, criterion, device, run, output_root)
+        test_metrics = test(model, test_evaluator, test_loader, task, criterion, device, run, output_root)
         print(f'train auc: {train_metrics[1]:.5f} acc: {train_metrics[2]:.5f}')
         print(f'val auc: {val_metrics[1]:.5f} acc: {val_metrics[2]:.5f}')
         print(f'test auc: {test_metrics[1]:.5f} acc: {test_metrics[2]:.5f}')
@@ -165,17 +138,17 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     trigger_times = 0  # Counter for early stopping
 
     for epoch in trange(num_epochs):
-        train_loss = train(model, train_loader, 'multi-class', criterion, optimizer, device, epoch)
-        train_metrics = test(model, train_evaluator, train_loader_at_eval, 'multi-class', criterion, device, run)
-        val_metrics = test(model, val_evaluator, val_loader, 'multi-class', criterion, device, run)
-        test_metrics = test(model, test_evaluator, test_loader, 'multi-class', criterion, device, run)
+        train_loss = train(model, train_loader, task, criterion, optimizer, device, epoch)
+        train_metrics = test(model, train_evaluator, train_loader_at_eval, task, criterion, device, run)
+        val_metrics = test(model, val_evaluator, val_loader, task, criterion, device, run)
+        test_metrics = test(model, test_evaluator, test_loader, task, criterion, device, run)
 
         scheduler.step()
 
         # Monitor GPU utilization
         gpu_memory = torch.cuda.memory_allocated(device) / 1024**3  # Convert to GB
         gpu_memory_reserved = torch.cuda.memory_reserved(device) / 1024**3  # Convert to GB
-        gpu_util = torch.cuda.utilization(device) if hasattr(torch.cuda, 'utilization') else -1  # Fallback if not available
+        gpu_util = torch.cuda.utilization(device) if hasattr(torch.cuda, 'utilization') else -1
 
         for i, key in enumerate(train_logs):
             log_dict[key] = train_metrics[i]
@@ -212,9 +185,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
                 print(f'Early stopping triggered at epoch {epoch} with best AUC: {best_auc}')
                 break
 
-    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, 'multi-class', criterion, device, run, output_root)
-    val_metrics = test(best_model, val_evaluator, val_loader, 'multi-class', criterion, device, run, output_root)
-    test_metrics = test(best_model, test_evaluator, test_loader, 'multi-class', criterion, device, run, output_root)
+    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, task, criterion, device, run, output_root)
+    val_metrics = test(best_model, val_evaluator, val_loader, task, criterion, device, run, output_root)
+    test_metrics = test(best_model, test_evaluator, test_loader, task, criterion, device, run, output_root)
 
     wandb.log({
         "final_train_loss": train_metrics[0],
@@ -288,11 +261,11 @@ def test(model, evaluator, data_loader, task, criterion, device, run, save_folde
 
 if __name__ == '__main__':
     torch.cuda.empty_cache()
-    parser = argparse.ArgumentParser(description='RUN Baseline model for bloodmnist_128.npz 128x128')
+    parser = argparse.ArgumentParser(description='RUN Baseline model for BloodMNIST 128x128')
     parser.add_argument('--data_flag',
-                        default='bloodmnist_128',
+                        default='bloodmnist',
                         type=str,
-                        help='Dataset flag (must be bloodmnist_128)')
+                        help='Dataset flag (must be bloodmnist)')
     parser.add_argument('--output_root',
                         default='./output',
                         help='output root for models and results',
@@ -305,14 +278,15 @@ if __name__ == '__main__':
                         default='0',
                         type=str)
     parser.add_argument('--batch_size',
-                        default=64,  # Reduced to avoid CUDA OOM
+                        default=64,
+                        help='batch size for training',
                         type=int)
     parser.add_argument('--download',
                         action='store_true',
-                        help='download dataset if not present (ignored for .npz)')
+                        help='download dataset if not present')
     parser.add_argument('--as_rgb',
                         action='store_true',
-                        help='use RGB images (assumed for bloodmnist_128.npz)')
+                        help='use RGB images (default for bloodmnist)')
     parser.add_argument('--model_path',
                         default=None,
                         help='path to pretrained model',
@@ -327,7 +301,7 @@ if __name__ == '__main__':
                         type=str)
 
     args = parser.parse_args()
-    if args.data_flag != 'bloodmnist_128':
-        raise ValueError("This script is configured for bloodmnist_128.npz only")
+    if args.data_flag != 'bloodmnist':
+        raise ValueError("This script is configured for bloodmnist only")
     main(args.data_flag, args.output_root, args.num_epochs, args.gpu_ids, args.batch_size,
          args.download, args.model_flag, args.as_rgb, args.model_path, args.run)
