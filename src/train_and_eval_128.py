@@ -20,6 +20,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     gamma = 0.1
     milestones = [0.5 * num_epochs, 0.75 * num_epochs]
     size = 128  # Fixed to 128x128 for pathmnist
+    patience = 10  # Number of epochs to wait for improvement before stopping
 
     if data_flag != 'pathmnist':
         raise ValueError("This script is configured for pathmnist only")
@@ -93,7 +94,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
             "image_size": size,
             "n_channels": n_channels,
             "n_classes": n_classes,
-            "run_name": run
+            "run_name": run,
+            "patience": patience
         }
     )
     wandb.run.name = f"{data_flag}_{model_flag}_{run}"
@@ -134,7 +136,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     best_auc = 0
     best_epoch = 0
     best_model = deepcopy(model)
-    iteration = 0  # Removed global for cleaner scope
+    trigger_times = 0  # Counter for early stopping
 
     for epoch in trange(num_epochs):
         train_loss = train(model, train_loader, task, criterion, optimizer, device, epoch)
@@ -158,6 +160,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
             best_epoch = epoch
             best_auc = cur_auc
             best_model = deepcopy(model)
+            trigger_times = 0  # Reset trigger times on improvement
             print(f'cur_best_auc: {best_auc}')
             print(f'cur_best_epoch: {best_epoch}')
             model_path = os.path.join(output_root, 'best_model.pth')
@@ -165,6 +168,12 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
             artifact = wandb.Artifact(f'best_model_{run}_epoch_{best_epoch}', type='model')
             artifact.add_file(model_path)
             wandb.log_artifact(artifact)
+        else:
+            trigger_times += 1
+            print(f'Early stopping trigger: {trigger_times}/{patience}')
+            if trigger_times >= patience:
+                print(f'Early stopping triggered at epoch {epoch} with best AUC: {best_auc}')
+                break
 
     train_metrics = test(best_model, train_evaluator, train_loader_at_eval, task, criterion, device, run, output_root)
     val_metrics = test(best_model, val_evaluator, val_loader, task, criterion, device, run, output_root)
