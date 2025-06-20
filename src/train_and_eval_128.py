@@ -16,12 +16,12 @@ import wandb
 from tqdm import trange
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, as_rgb, model_path, run):
-    lr = 0.0001  # Reduced learning rate
+    lr = 0.00005  # Reduced learning rate
     gamma = 0.1
     milestones = [0.5 * num_epochs, 0.75 * num_epochs]
     size = 128  # For bloodmnist_128
     patience = 20  # Increased patience for early stopping
-    max_grad_norm = 1.0  # Gradient clipping threshold
+    max_grad_norm = 0.5  # Gradient clipping threshold
 
     if data_flag != 'bloodmnist':
         raise ValueError("This script is configured for bloodmnist only")
