@@ -16,11 +16,12 @@ import wandb
 from tqdm import trange
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, as_rgb, model_path, run):
-    lr = 0.001
+    lr = 0.0001  # Reduced learning rate
     gamma = 0.1
     milestones = [0.5 * num_epochs, 0.75 * num_epochs]
     size = 128  # For bloodmnist_128
-    patience = 10  # Number of epochs to wait for improvement before stopping
+    patience = 20  # Increased patience for early stopping
+    max_grad_norm = 1.0  # Gradient clipping threshold
 
     if data_flag != 'bloodmnist':
         raise ValueError("This script is configured for bloodmnist only")
@@ -35,7 +36,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     str_ids = gpu_ids.split(',')
     gpu_ids = [int(id) for id in str_ids if int(id) >= 0]
     if gpu_ids:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[0])
+        os.environ["CUDA_VISIBLE_DEVICES"] = str_ids[0]
     device = torch.device(f'cuda:{gpu_ids[0]}') if gpu_ids else torch.device('cpu')
 
     output_root = os.path.join(output_root, data_flag, time.strftime("%y%m%d_%H%M%S"))
@@ -124,7 +125,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         return
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
 
     logs = ['loss', 'auc', 'acc']
     train_logs = ['train_' + log for log in logs]
@@ -135,19 +136,19 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     best_auc = 0
     best_epoch = 0
     best_model = deepcopy(model)
-    trigger_times = 0  # Counter for early stopping
+    trigger_times = 0
 
     for epoch in trange(num_epochs):
-        train_loss = train(model, train_loader, task, criterion, optimizer, device, epoch)
+        train_loss = train(model, train_loader, task, criterion, optimizer, device, epoch, max_grad_norm)
         train_metrics = test(model, train_evaluator, train_loader_at_eval, task, criterion, device, run)
         val_metrics = test(model, val_evaluator, val_loader, task, criterion, device, run)
         test_metrics = test(model, test_evaluator, test_loader, task, criterion, device, run)
 
-        scheduler.step()
+        scheduler.step(val_metrics[1])
 
         # Monitor GPU utilization
-        gpu_memory = torch.cuda.memory_allocated(device) / 1024**3  # Convert to GB
-        gpu_memory_reserved = torch.cuda.memory_reserved(device) / 1024**3  # Convert to GB
+        gpu_memory = torch.cuda.memory_allocated(device) / 1024**3
+        gpu_memory_reserved = torch.cuda.memory_reserved(device) / 1024**3
         gpu_util = torch.cuda.utilization(device) if hasattr(torch.cuda, 'utilization') else -1
 
         for i, key in enumerate(train_logs):
@@ -157,7 +158,6 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         for i, key in enumerate(test_logs):
             log_dict[key] = test_metrics[i]
 
-        # Add GPU metrics to log_dict
         log_dict['gpu_memory_allocated_gb'] = gpu_memory
         log_dict['gpu_memory_reserved_gb'] = gpu_memory_reserved
         if gpu_util != -1:
@@ -170,7 +170,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
             best_epoch = epoch
             best_auc = cur_auc
             best_model = deepcopy(model)
-            trigger_times = 0  # Reset trigger times on improvement
+            trigger_times = 0
             print(f'cur_best_auc: {best_auc}')
             print(f'cur_best_epoch: {best_epoch}')
             model_path = os.path.join(output_root, 'best_model.pth')
@@ -214,7 +214,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     wandb.finish()
 
-def train(model, train_loader, task, criterion, optimizer, device, epoch):
+def train(model, train_loader, task, criterion, optimizer, device, epoch, max_grad_norm):
     total_loss = []
     model.train()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
@@ -228,6 +228,7 @@ def train(model, train_loader, task, criterion, optimizer, device, epoch):
             loss = criterion(outputs, targets)
         total_loss.append(loss.item())
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)  # Gradient clipping
         optimizer.step()
     epoch_loss = sum(total_loss) / len(total_loss)
     wandb.log({'train_loss_logs': epoch_loss}, step=epoch)
