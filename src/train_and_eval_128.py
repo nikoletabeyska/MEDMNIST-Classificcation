@@ -125,7 +125,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         return
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5)  # Removed verbose
 
     logs = ['loss', 'auc', 'acc']
     train_logs = ['train_' + log for log in logs]
