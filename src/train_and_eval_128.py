@@ -28,6 +28,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     # Get dataset info from MedMNIST
     info = INFO[data_flag]
+    print(info)
     n_channels = info['n_channels']  # 3 for BloodMNIST (RGB)
     n_classes = len(info['label'])   # 8 classes for BloodMNIST
     task = info['task']              # multi-class
@@ -125,7 +126,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         return
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5)  # Removed verbose
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=20)  # Removed verbose
 
     logs = ['loss', 'auc', 'acc']
     train_logs = ['train_' + log for log in logs]
